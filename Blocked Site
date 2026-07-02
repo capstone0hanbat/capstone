@@ -1,0 +1,120 @@
+from flask import Flask, request
+from datetime import datetime
+import os
+import csv
+
+import firebase_admin
+from firebase_admin import credentials
+from firebase_admin import db
+
+app = Flask(__name__)
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BLOCK_LOG_PATH = os.path.join(BASE_DIR, "blocked_log.csv")
+
+# Firebase 설정
+cred = credentials.Certificate(os.path.join(BASE_DIR, "serviceAccountKey.json"))
+
+if not firebase_admin._apps:
+    firebase_admin.initialize_app(cred, {
+        "databaseURL": "https://smart-traffic-monitor-c0719-default-rtdb.firebaseio.com"
+    })
+
+blocked_ref = db.reference("blocked_logs")
+
+
+def get_client_ip():
+    x_forwarded_for = request.headers.get("X-Forwarded-For")
+    x_real_ip = request.headers.get("X-Real-IP")
+    forwarded = request.headers.get("Forwarded")
+
+    if x_forwarded_for:
+        return x_forwarded_for.split(",")[0].strip()
+
+    if x_real_ip:
+        return x_real_ip
+
+    if forwarded:
+        return forwarded
+
+    return request.remote_addr
+
+
+def save_block_log(ip, user_agent):
+    now = datetime.now()
+
+    file_exists = os.path.exists(BLOCK_LOG_PATH)
+
+    remote_addr = request.remote_addr
+    x_forwarded_for = request.headers.get("X-Forwarded-For")
+    x_real_ip = request.headers.get("X-Real-IP")
+    forwarded = request.headers.get("Forwarded")
+
+    # CSV 저장
+    with open(BLOCK_LOG_PATH, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+
+        if not file_exists:
+            writer.writerow([
+                "time",
+                "ip",
+                "remote_addr",
+                "x_forwarded_for",
+                "x_real_ip",
+                "forwarded",
+                "user_agent",
+                "blocked_site",
+                "reason",
+                "status"
+            ])
+
+        writer.writerow([
+            now,
+            ip,
+            remote_addr,
+            x_forwarded_for,
+            x_real_ip,
+            forwarded,
+            user_agent,
+            "차단 사이트",
+            "보호자 설정에 의해 차단된 사이트",
+            "BLOCK"
+        ])
+
+    # Firebase 저장
+    data = {
+        "time": str(now),
+        "ip": ip,
+        "remote_addr": remote_addr,
+        "x_forwarded_for": x_forwarded_for,
+        "x_real_ip": x_real_ip,
+        "forwarded": forwarded,
+        "user_agent": user_agent,
+        "blocked_site": "차단 사이트",
+        "reason": "보호자 설정에 의해 차단된 사이트",
+        "status": "BLOCK"
+    }
+
+    blocked_ref.push(data)
+
+    print("차단 로그 저장 완료:", data)
+
+
+@app.route("/")
+def blocked_home():
+    print("전체 헤더:", dict(request.headers))
+
+    ip = get_client_ip()
+    user_agent = request.headers.get("User-Agent")
+
+    save_block_log(ip, user_agent)
+
+    return """
+    <h1>접속 차단</h1>
+    <p>이 사이트는 보호자 설정에 의해 차단되었습니다.</p>
+    <p>차단 기록이 Firebase에 저장되었습니다.</p>
+    """
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5001, debug=True)
