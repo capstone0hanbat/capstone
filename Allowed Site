@@ -1,0 +1,160 @@
+from flask import Flask, request, send_file
+from datetime import datetime
+import os
+import csv
+
+import firebase_admin
+from firebase_admin import credentials
+from firebase_admin import db
+
+app = Flask(__name__)
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+VIDEO_PATH = os.path.join(BASE_DIR, "sample.mp4")
+LOG_PATH = os.path.join(BASE_DIR, "traffic_log.csv")
+
+# Firebase 설정
+cred = credentials.Certificate(os.path.join(BASE_DIR, "serviceAccountKey.json"))
+
+if not firebase_admin._apps:
+    firebase_admin.initialize_app(cred, {
+        "databaseURL": "https://smart-traffic-monitor-c0719-default-rtdb.firebaseio.com"
+    })
+
+traffic_ref = db.reference("traffic_logs")
+
+
+def get_client_ip():
+    x_forwarded_for = request.headers.get("X-Forwarded-For")
+    x_real_ip = request.headers.get("X-Real-IP")
+    forwarded = request.headers.get("Forwarded")
+
+    if x_forwarded_for:
+        return x_forwarded_for.split(",")[0].strip()
+
+    if x_real_ip:
+        return x_real_ip
+
+    if forwarded:
+        return forwarded
+
+    return request.remote_addr
+
+
+def save_log(ip, user_agent, request_type, data_size):
+    now = datetime.now()
+
+    file_exists = os.path.exists(LOG_PATH)
+
+    remote_addr = request.remote_addr
+    x_forwarded_for = request.headers.get("X-Forwarded-For")
+    x_real_ip = request.headers.get("X-Real-IP")
+    forwarded = request.headers.get("Forwarded")
+
+    # CSV 저장
+    with open(LOG_PATH, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+
+        if not file_exists:
+            writer.writerow([
+                "time",
+                "ip",
+                "remote_addr",
+                "x_forwarded_for",
+                "x_real_ip",
+                "forwarded",
+                "user_agent",
+                "site_type",
+                "request_type",
+                "data_size_bytes",
+                "status"
+            ])
+
+        writer.writerow([
+            now,
+            ip,
+            remote_addr,
+            x_forwarded_for,
+            x_real_ip,
+            forwarded,
+            user_agent,
+            "ALLOW_SITE",
+            request_type,
+            data_size,
+            "ALLOW"
+        ])
+
+    # Firebase 저장
+    data = {
+        "time": str(now),
+        "ip": ip,
+        "remote_addr": remote_addr,
+        "x_forwarded_for": x_forwarded_for,
+        "x_real_ip": x_real_ip,
+        "forwarded": forwarded,
+        "user_agent": user_agent,
+        "site_type": "ALLOW_SITE",
+        "request_type": request_type,
+        "data_size_bytes": data_size,
+        "data_size_mb": round(data_size / 1024 / 1024, 2),
+        "status": "ALLOW"
+    }
+
+    traffic_ref.push(data)
+
+    print("허용 사이트 로그 저장 완료:", data)
+
+
+@app.route("/")
+def home():
+    print("전체 헤더:", dict(request.headers))
+
+    ip = get_client_ip()
+    user_agent = request.headers.get("User-Agent")
+
+    save_log(ip, user_agent, "HOME", 0)
+
+    return """
+    <h1>허용 사이트</h1>
+    <p>이 사이트는 보호자 설정에 의해 허용된 사이트입니다.</p>
+    <p>영상 재생 시 트래픽 로그가 Firebase에 저장됩니다.</p>
+
+    <h3>영상 콘텐츠</h3>
+    <video width="640" controls>
+        <source src="/video" type="video/mp4">
+        브라우저가 video 태그를 지원하지 않습니다.
+    </video>
+
+    <br><br>
+    <button onclick="location.reload()">새로고침 테스트</button>
+
+    <hr>
+
+    <h3>실험 안내</h3>
+    <p>차단 사이트는 별도 주소에서 실행됩니다.</p>
+    <p>차단 사이트는 blocked_app.py에서 5001번 포트로 실행됩니다.</p>
+    """
+
+
+@app.route("/video")
+def video():
+    print("전체 헤더:", dict(request.headers))
+
+    ip = get_client_ip()
+    user_agent = request.headers.get("User-Agent")
+
+    if not os.path.exists(VIDEO_PATH):
+        return "sample.mp4 파일이 없습니다.", 404
+
+    video_size = os.path.getsize(VIDEO_PATH)
+
+    save_log(ip, user_agent, "VIDEO", video_size)
+
+    print("영상 요청 발생:", datetime.now(), ip, video_size, "bytes")
+
+    return send_file(VIDEO_PATH, mimetype="video/mp4")
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
